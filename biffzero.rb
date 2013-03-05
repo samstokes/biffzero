@@ -1,8 +1,10 @@
 #!/home/sam/.rvm/rubies/ruby-1.8.7-p302/bin/ruby -rubygems
+require 'net/https'
 require 'net/imap'
 require 'gmail_xoauth'
 require 'redis'
 require 'SVG/Graph/Line'
+require 'uri'
 require 'yaml'
 
 class BiffZero
@@ -40,9 +42,9 @@ class BiffZero
     end
   end
 
-  def save_message_counts
-    config['mailboxes'].each do |mailbox|
-      save_message_count(mailbox, message_count(imap, mailbox))
+  def message_counts
+    config['mailboxes'].map do |mailbox|
+      [mailbox, message_count(imap, mailbox)]
     end
   end
 
@@ -68,6 +70,32 @@ class BiffZero
       graph.add_data(:data => counts, :title => mailbox)
     end
     graph.burn
+  end
+
+  def beeminder
+    config['beeminder']
+  end
+
+  def beemind(message_counts)
+    generic_comment = "Reported by biffzero at #{Time.now.strftime('%l:%M%P %Z')}"
+    comment = if message_counts.size > 1
+                "#{Hash[*message_counts.flatten(1)].inspect} | #{generic_comment}"
+              else
+                generic_comment
+              end
+    url = URI.parse("https://www.beeminder.com/api/v1/users/#{beeminder['user']}/goals/#{beeminder['goal']}/datapoints.json")
+    request = Net::HTTP::Post.new(url.path)
+    request.set_form_data(
+      'auth_token' => beeminder['token'],
+      'timestamp' => Time.now.to_i.to_s,
+      'comment' => comment,
+      'value' => message_counts.map {|mailbox, count| count }.inject(&:+).to_s
+    )
+    http = Net::HTTP.new(url.host, url.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    http.ca_file = '/usr/lib/ssl/certs/ca-certificates.crt'
+    http.request(request)
   end
 
   def message_count(imap, mailbox)
@@ -114,6 +142,10 @@ end
 
 config_path = ARGV[0] or raise 'Please specify config file'
 BiffZero.connect(config_path) do |bz|
-  bz.save_message_counts
+  message_counts = bz.message_counts
+  message_counts.each do |mailbox, count|
+    bz.save_message_count(mailbox, count)
+  end
+  bz.beemind(message_counts) if bz.beeminder
   print bz.graph_message_counts
 end
